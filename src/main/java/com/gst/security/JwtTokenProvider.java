@@ -4,6 +4,7 @@ import io.jsonwebtoken.*;
 import io.jsonwebtoken.security.Keys;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Component;
 
 import javax.crypto.SecretKey;
@@ -40,38 +41,49 @@ public class JwtTokenProvider {
         Date expiryDate = new Date(now.getTime() + jwtExpirationMs);
 
         return Jwts.builder()
-                .setClaims(claims)
-                .setSubject(subject)
-                .setIssuedAt(now)
-                .setExpiration(expiryDate)
-                .signWith(getSigningKey(), SignatureAlgorithm.HS512)
+                .claims(claims)
+                .subject(subject)
+                .issuedAt(now)
+                .expiration(expiryDate)
+                .signWith(getSigningKey(), Jwts.SIG.HS512)
                 .compact();
     }
 
-    public String getClientIdFromToken(String token) {
-        return Jwts.parserBuilder()
-                .setSigningKey(getSigningKey())
-                .build()
-                .parseClaimsJws(token)
-                .getBody()
-                .getSubject();
+    @Cacheable(value = "tokenCache", key = "#token")\n    public String getClientIdFromToken(String token) {
+        try {
+            return Jwts.parser()
+                    .verifyWith(getSigningKey())
+                    .build()
+                    .parseSignedClaims(token)
+                    .getPayload()
+                    .getSubject();
+        } catch (JwtException e) {
+            log.error("Error extracting client ID from token: {}", e.getMessage());
+            return null;
+        }
     }
 
+    @Cacheable(value = "tokenClaimsCache", key = "#token")
     public String getClientIdFromClaims(String token) {
-        return (String) Jwts.parserBuilder()
-                .setSigningKey(getSigningKey())
-                .build()
-                .parseClaimsJws(token)
-                .getBody()
-                .get("clientId");
+        try {
+            return (String) Jwts.parser()
+                    .verifyWith(getSigningKey())
+                    .build()
+                    .parseSignedClaims(token)
+                    .getPayload()
+                    .get("clientId");
+        } catch (JwtException e) {
+            log.error("Error extracting client ID from claims: {}", e.getMessage());
+            return null;
+        }
     }
 
     public boolean validateToken(String token) {
         try {
-            Jwts.parserBuilder()
-                    .setSigningKey(getSigningKey())
+            Jwts.parser()
+                    .verifyWith(getSigningKey())
                     .build()
-                    .parseClaimsJws(token);
+                    .parseSignedClaims(token);
             return true;
         } catch (SecurityException e) {
             log.error("Invalid JWT signature: {}", e.getMessage());
@@ -83,6 +95,8 @@ public class JwtTokenProvider {
             log.error("Unsupported JWT token: {}", e.getMessage());
         } catch (IllegalArgumentException e) {
             log.error("JWT claims string is empty: {}", e.getMessage());
+        } catch (JwtException e) {
+            log.error("JWT validation error: {}", e.getMessage());
         }
         return false;
     }

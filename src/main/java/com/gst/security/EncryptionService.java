@@ -1,79 +1,123 @@
 package com.gst.security;
 
-import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.codec.binary.Base64;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.springframework.stereotype.Service;
 
 import javax.crypto.Cipher;
-import java.security.KeyPair;
+import javax.crypto.KeyGenerator;
+import javax.crypto.Mac;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
 import java.security.PrivateKey;
-import java.security.PublicKey;
-import java.util.Base64;
+import java.security.Security;
+import java.security.spec.PKCS8EncodedKeySpec;
 
-@Slf4j
+/**
+ * Server-side encryption service for RSA and AES operations
+ */
 @Service
 public class EncryptionService {
 
-    private static final String CIPHER_ALGORITHM = "RSA/ECB/PKCS1Padding";
+    static {
+        Security.addProvider(new BouncyCastleProvider());
+    }
+
+    private static final String RSA_ALGORITHM = "RSA/ECB/PKCS1Padding";
+    private static final String AES_ALGORITHM = "AES/ECB/PKCS5Padding";
     private static final String KEY_ALGORITHM = "RSA";
+    private static final int AES_KEY_SIZE = 256;
 
     /**
-     * Encrypt data using public key
+     * Generate a random 256-bit AES key (SEK - Session Encryption Key)
      */
-    public String encryptWithPublicKey(String data, PublicKey publicKey) {
+    public String generateSEK() {
         try {
-            Cipher cipher = Cipher.getInstance(CIPHER_ALGORITHM);
-            cipher.init(Cipher.ENCRYPT_MODE, publicKey);
-            byte[] encryptedData = cipher.doFinal(data.getBytes());
-            return Base64.getEncoder().encodeToString(encryptedData);
+            KeyGenerator keyGen = KeyGenerator.getInstance("AES");
+            keyGen.init(AES_KEY_SIZE);
+            SecretKey secretKey = keyGen.generateKey();
+            return Base64.encodeBase64String(secretKey.getEncoded());
         } catch (Exception e) {
-            log.error("Error encrypting data with public key: {}", e.getMessage(), e);
-            throw new RuntimeException("Encryption failed", e);
+            throw new RuntimeException("Error generating SEK", e);
         }
     }
 
     /**
-     * Decrypt data using private key
+     * Decrypt appKey using RSA private key
      */
-    public String decryptWithPrivateKey(String encryptedData, PrivateKey privateKey) {
+    public byte[] decryptAppKeyWithRSA(String encryptedAppKey, PrivateKey privateKey) {
         try {
-            Cipher cipher = Cipher.getInstance(CIPHER_ALGORITHM);
+            byte[] appKeyBytes = Base64.decodeBase64(encryptedAppKey);
+            Cipher cipher = Cipher.getInstance(RSA_ALGORITHM, "BC");
             cipher.init(Cipher.DECRYPT_MODE, privateKey);
-            byte[] decodedData = Base64.getDecoder().decode(encryptedData);
-            byte[] decryptedData = cipher.doFinal(decodedData);
-            return new String(decryptedData);
+            return cipher.doFinal(appKeyBytes);
         } catch (Exception e) {
-            log.error("Error decrypting data with private key: {}", e.getMessage(), e);
-            throw new RuntimeException("Decryption failed", e);
+            throw new RuntimeException("Error decrypting app key with RSA", e);
         }
     }
 
     /**
-     * Encrypt data using SEK (Session Encryption Key) - AES
+     * Decrypt data using AES-256 ECB mode with PKCS5 padding
      */
-    public String encryptWithSEK(String data, String sek) {
+    public String decryptWithAES(String encryptedText, byte[] aesKey) {
         try {
-            // For production, use AES encryption
-            Cipher cipher = Cipher.getInstance("AES");
-            // This is a simplified version - implement proper AES encryption with IV
-            byte[] encryptedData = data.getBytes(); // Replace with actual AES encryption
-            return Base64.getEncoder().encodeToString(encryptedData);
+            SecretKey secretKey = new SecretKeySpec(aesKey, 0, aesKey.length, "AES");
+            Cipher cipher = Cipher.getInstance(AES_ALGORITHM);
+            cipher.init(Cipher.DECRYPT_MODE, secretKey);
+            byte[] decodedEncryptedText = Base64.decodeBase64(encryptedText);
+            byte[] decryptedData = cipher.doFinal(decodedEncryptedText);
+            return new String(decryptedData, StandardCharsets.UTF_8);
         } catch (Exception e) {
-            log.error("Error encrypting data with SEK: {}", e.getMessage(), e);
-            throw new RuntimeException("SEK encryption failed", e);
+            throw new RuntimeException("Error decrypting with AES", e);
         }
     }
 
     /**
-     * Decrypt data using SEK (Session Encryption Key) - AES
+     * Encrypt data using AES-256 ECB mode with PKCS5 padding
      */
-    public String decryptWithSEK(String encryptedData, String sek) {
+    public String encryptWithAES(String plainText, byte[] aesKey) {
         try {
-            // For production, use AES decryption
-            byte[] decodedData = Base64.getDecoder().decode(encryptedData);
-            return new String(decodedData); // Replace with actual AES decryption
+            SecretKey secretKey = new SecretKeySpec(aesKey, 0, aesKey.length, "AES");
+            Cipher cipher = Cipher.getInstance(AES_ALGORITHM);
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey);
+            byte[] encryptedData = cipher.doFinal(plainText.getBytes(StandardCharsets.UTF_8));
+            return Base64.encodeBase64String(encryptedData);
         } catch (Exception e) {
-            log.error("Error decrypting data with SEK: {}", e.getMessage(), e);
-            throw new RuntimeException("SEK decryption failed", e);
+            throw new RuntimeException("Error encrypting with AES", e);
         }
+    }
+
+    /**
+     * Load RSA private key from PEM format
+     */
+    public PrivateKey loadPrivateKeyFromPem(String privateKeyPem) {
+        try {
+            String key = privateKeyPem
+                    .replace("-----BEGIN PRIVATE KEY-----", "")
+                    .replace("-----BEGIN RSA PRIVATE KEY-----", "")
+                    .replace("-----END PRIVATE KEY-----", "")
+                    .replace("-----END RSA PRIVATE KEY-----", "")
+                    .replaceAll("\\s+", "");
+
+            byte[] decodedKey = Base64.decodeBase64(key);
+            PKCS8EncodedKeySpec spec = new PKCS8EncodedKeySpec(decodedKey);
+            KeyFactory keyFactory = KeyFactory.getInstance(KEY_ALGORITHM);
+            return keyFactory.generatePrivate(spec);
+        } catch (Exception e) {
+            throw new RuntimeException("Error loading private key from PEM", e);
+        }
+    }
+
+    /**
+     * Generate HMAC-SHA256
+     */
+    public String generateHmac(String data, byte[] key) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        SecretKeySpec secretKey = new SecretKeySpec(key, "HmacSHA256");
+        mac.init(secretKey);
+        byte[] hmac = mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
+        return Base64.encodeBase64String(hmac);
     }
 }
